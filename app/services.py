@@ -6,7 +6,7 @@ from app.schemas import UserCreate
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
-# -------------------- User Services -------------------- #
+#  User Services 
 def get_user(db: Session, user_id: str) -> User | None:
     """Fetch a user by user_id"""
     return db.query(User).filter(User.user_id == user_id).first()

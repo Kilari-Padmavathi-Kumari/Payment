@@ -5,7 +5,7 @@ from passlib.context import CryptContext
 from app.config import settings
 from app.schemas import TokenData
 
-# ✅ Simple, correct bcrypt setup via passlib
+#  Simple, correct bcrypt setup via passlib
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:

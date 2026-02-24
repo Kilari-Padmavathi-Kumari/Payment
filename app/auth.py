@@ -15,7 +15,7 @@ security = HTTPBearer(auto_error=False)
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
 
-# -------------------- Dependency -------------------- #
+# Dependency 
 async def get_current_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(security),
@@ -67,7 +67,7 @@ async def get_optional_user(
     return get_user(db, user_id=token_data.user_id)
 
 
-# -------------------- Routes -------------------- #
+#  Routes  
 @router.post("/register", response_model=UserResponse, status_code=201)
 async def register(user: UserCreate, db: Session = Depends(get_db)):
     """Register a new user (Public)"""
