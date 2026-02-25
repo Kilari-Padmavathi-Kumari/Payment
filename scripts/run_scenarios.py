@@ -4,53 +4,105 @@ import argparse
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import random
+from typing import Any, Dict, List
 
 
 class ScenarioRunner:
     def __init__(self, base_url: str, customer_id: str):
-        self.base_url = base_url
+        normalized = base_url.rstrip("/")
+        self.base_url = normalized if normalized.endswith("/api") else f"{normalized}/api"
         self.customer_id = customer_id
+        self.email = f"{self.customer_id.lower()}@example.com"
+        self.password = "password123"
+        self.session = requests.Session()
+        self.auth_headers: Dict[str, str] = {}
+
+    def _json_or_text(self, response: requests.Response) -> Any:
+        try:
+            return response.json()
+        except ValueError:
+            return response.text
+
+    def _request(self, method: str, path: str, **kwargs) -> requests.Response:
+        headers = kwargs.pop("headers", {})
+        merged_headers = dict(self.auth_headers)
+        merged_headers.update(headers)
+        return self.session.request(
+            method=method,
+            url=f"{self.base_url}{path}",
+            headers=merged_headers,
+            **kwargs
+        )
     
     def ensure_user(self):
         """Ensure user exists."""
         print(f"Ensuring user exists for {self.customer_id}...")
-        response = requests.get(f"{self.base_url}/users/{self.customer_id}")
-        if response.status_code == 404:
-            print(f"Creating user {self.customer_id}...")
-            requests.post(
-                f"{self.base_url}/users",
-                json={
-                    "user_id": self.customer_id,
-                    "email": f"{self.customer_id.lower()}@example.com",
-                    "full_name": f"Test User {self.customer_id}",
-                    "phone": "+91-9876543210"
-                }
+        register_response = self._request(
+            "POST",
+            "/auth/register",
+            json={
+                "user_id": self.customer_id,
+                "email": self.email,
+                "full_name": f"Test User {self.customer_id}",
+                "phone": "+91-9876543210",
+                "password": self.password
+            },
+            timeout=10.0
+        )
+        if register_response.status_code == 201:
+            print(f"User {self.customer_id} created.")
+        elif register_response.status_code == 400:
+            print(f"User {self.customer_id} already exists.")
+        else:
+            raise RuntimeError(
+                f"Failed to register user: {register_response.status_code} - "
+                f"{self._json_or_text(register_response)}"
             )
+
+        login_response = self._request(
+            "POST",
+            "/auth/login",
+            json={"user_id": self.customer_id, "password": self.password},
+            timeout=10.0
+        )
+        if login_response.status_code != 200:
+            raise RuntimeError(
+                f"Failed to login user: {login_response.status_code} - "
+                f"{self._json_or_text(login_response)}"
+            )
+
+        token = login_response.json().get("access_token")
+        if not token:
+            raise RuntimeError("Login succeeded but no access token returned")
+        self.auth_headers = {"Authorization": f"Bearer {token}"}
     
     def ensure_wallet(self):
         """Ensure wallet exists with initial balance."""
         self.ensure_user()
         print(f"Ensuring wallet exists for {self.customer_id}...")
-        response = requests.get(f"{self.base_url}/wallet/{self.customer_id}")
+        response = self._request("GET", f"/wallet/{self.customer_id}", timeout=10.0)
         if response.status_code == 200:
             data = response.json()
             print(f"Wallet balance: {data['balance']}")
             if data['balance'] < 500:
                 print("Topping up wallet...")
-                requests.post(
-                    f"{self.base_url}/wallet/{self.customer_id}/credit",
+                self._request(
+                    "POST",
+                    f"/wallet/{self.customer_id}/credit",
                     json={"amount": 1000.0}
                 )
         elif response.status_code == 404:
             print("Creating wallet...")
-            requests.post(
-                f"{self.base_url}/wallet/{self.customer_id}/credit",
+            self._request(
+                "POST",
+                f"/wallet/{self.customer_id}/credit",
                 json={"amount": 1000.0}
             )
     
     def orders_retry(self):
         """Scenario: Order creation with timeout and retry."""
         print("\n=== Running orders_retry scenario ===")
+        self.ensure_user()
         
         idempotency_key = f"retry-test-{int(time.time())}"
         order_payload = {
@@ -62,31 +114,37 @@ class ScenarioRunner:
         
         print(f"Attempt 1: Creating order with idempotency_key={idempotency_key}")
         try:
-            response1 = requests.post(
-                f"{self.base_url}/orders",
+            response1 = self._request(
+                "POST",
+                "/orders",
                 json=order_payload,
                 timeout=1.0
             )
-            print(f"Attempt 1 response: {response1.status_code} - {response1.json()}")
+            print(f"Attempt 1 response: {response1.status_code} - {self._json_or_text(response1)}")
         except requests.exceptions.Timeout:
             print("Attempt 1: Request timed out")
         
         print("\nAttempt 2: Retrying same order...")
         try:
-            response2 = requests.post(
-                f"{self.base_url}/orders",
+            response2 = self._request(
+                "POST",
+                "/orders",
                 json=order_payload,
                 timeout=5.0
             )
-            print(f"Attempt 2 response: {response2.status_code} - {response2.json()}")
+            print(f"Attempt 2 response: {response2.status_code} - {self._json_or_text(response2)}")
         except requests.exceptions.Timeout:
             print("Attempt 2: Request timed out")
         
         time.sleep(1)
         
         print(f"\nFetching all orders for {self.customer_id}...")
-        response = requests.get(f"{self.base_url}/orders?customer_id={self.customer_id}")
-        orders = response.json()
+        response = self._request("GET", "/orders", params={"customer_id": self.customer_id}, timeout=10.0)
+        payload = self._json_or_text(response)
+        if response.status_code != 200 or not isinstance(payload, list):
+            print(f"Failed to fetch orders: {response.status_code} - {payload}")
+            return
+        orders: List[Dict[str, Any]] = payload
         
         matching_orders = [o for o in orders if o.get('idempotency_key') == idempotency_key]
         print(f"Orders with idempotency_key={idempotency_key}: {len(matching_orders)}")
@@ -101,15 +159,19 @@ class ScenarioRunner:
         self.ensure_wallet()
         
         print("\nSetting up wallet with known balance...")
-        response = requests.post(
-            f"{self.base_url}/wallet/{self.customer_id}/credit",
+        self._request(
+            "POST",
+            f"/wallet/{self.customer_id}/credit",
             json={"amount": 500.0}
         )
         
         time.sleep(0.5)
         
-        initial_response = requests.get(f"{self.base_url}/wallet/{self.customer_id}")
-        initial_balance = initial_response.json()['balance']
+        initial_response = self._request("GET", f"/wallet/{self.customer_id}", timeout=10.0)
+        initial_payload = self._json_or_text(initial_response)
+        if initial_response.status_code != 200 or not isinstance(initial_payload, dict) or "balance" not in initial_payload:
+            raise RuntimeError(f"Unable to fetch initial wallet balance: {initial_response.status_code} - {initial_payload}")
+        initial_balance = initial_payload['balance']
         print(f"Starting balance: {initial_balance}")
         
         num_operations = 25
@@ -119,8 +181,9 @@ class ScenarioRunner:
         
         def debit_operation(i):
             try:
-                response = requests.post(
-                    f"{self.base_url}/wallet/{self.customer_id}/debit",
+                response = self._request(
+                    "POST",
+                    f"/wallet/{self.customer_id}/debit",
                     json={"amount": debit_amount}
                 )
                 return response.status_code == 200
@@ -136,8 +199,11 @@ class ScenarioRunner:
         
         time.sleep(0.5)
         
-        final_response = requests.get(f"{self.base_url}/wallet/{self.customer_id}")
-        final_balance = final_response.json()['balance']
+        final_response = self._request("GET", f"/wallet/{self.customer_id}", timeout=10.0)
+        final_payload = self._json_or_text(final_response)
+        if final_response.status_code != 200 or not isinstance(final_payload, dict) or "balance" not in final_payload:
+            raise RuntimeError(f"Unable to fetch final wallet balance: {final_response.status_code} - {final_payload}")
+        final_balance = final_payload['balance']
         
         expected_balance = initial_balance - (successful * debit_amount)
         
@@ -149,6 +215,7 @@ class ScenarioRunner:
     def false_success(self):
         """Scenario: API returns success on constraint violation."""
         print("\n=== Running false_success scenario ===")
+        self.ensure_user()
         
         invalid_payload = {
             "customer_id": self.customer_id,
@@ -158,19 +225,24 @@ class ScenarioRunner:
         }
         
         print(f"Creating order with amount=0 (violates constraint)...")
-        response = requests.post(
-            f"{self.base_url}/orders",
+        response = self._request(
+            "POST",
+            "/orders",
             json=invalid_payload
         )
         
         print(f"Response status: {response.status_code}")
-        print(f"Response body: {response.json()}")
+        print(f"Response body: {self._json_or_text(response)}")
         
         time.sleep(0.5)
         
         print(f"\nVerifying order persistence...")
-        orders_response = requests.get(f"{self.base_url}/orders?customer_id={self.customer_id}")
-        orders = orders_response.json()
+        orders_response = self._request("GET", "/orders", params={"customer_id": self.customer_id}, timeout=10.0)
+        payload = self._json_or_text(orders_response)
+        if orders_response.status_code != 200 or not isinstance(payload, list):
+            print(f"Failed to fetch orders: {orders_response.status_code} - {payload}")
+            return
+        orders = payload
         
         matching = [o for o in orders if o.get('idempotency_key') == invalid_payload['idempotency_key']]
         print(f"Orders found with idempotency_key={invalid_payload['idempotency_key']}: {len(matching)}")
@@ -199,23 +271,26 @@ class ScenarioRunner:
         for op_type, amount in operations:
             if op_type == "credit":
                 print(f"\nCrediting {amount}...")
-                requests.post(
-                    f"{self.base_url}/wallet/{self.customer_id}/credit",
+                self._request(
+                    "POST",
+                    f"/wallet/{self.customer_id}/credit",
                     json={"amount": amount}
                 )
             elif op_type == "debit":
                 print(f"\nDebiting {amount}...")
                 try:
-                    requests.post(
-                        f"{self.base_url}/wallet/{self.customer_id}/debit",
+                    self._request(
+                        "POST",
+                        f"/wallet/{self.customer_id}/debit",
                         json={"amount": amount}
                     )
                 except Exception:
                     pass
             elif op_type == "order":
                 print(f"\nCreating order for {amount}...")
-                requests.post(
-                    f"{self.base_url}/orders",
+                self._request(
+                    "POST",
+                    "/orders",
                     json={
                         "customer_id": self.customer_id,
                         "amount": amount,
@@ -227,10 +302,10 @@ class ScenarioRunner:
             time.sleep(0.2)
         
         print("\n=== Final state ===")
-        wallet = requests.get(f"{self.base_url}/wallet/{self.customer_id}").json()
+        wallet = self._request("GET", f"/wallet/{self.customer_id}", timeout=10.0).json()
         print(f"Wallet balance: {wallet['balance']}")
         
-        orders = requests.get(f"{self.base_url}/orders?customer_id={self.customer_id}").json()
+        orders = self._request("GET", "/orders", params={"customer_id": self.customer_id}, timeout=10.0).json()
         print(f"Total orders: {len(orders)}")
 
 

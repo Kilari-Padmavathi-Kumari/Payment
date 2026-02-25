@@ -120,7 +120,7 @@ def create_order_immediate(db: Session, order_data: OrderCreate) -> Order:
             return existing
 
     order = Order(
-        id=uuid.uuid4(),
+        id=str(uuid.uuid4()),
         customer_id=order_data.customer_id,
         amount=order_data.amount,
         currency=order_data.currency,

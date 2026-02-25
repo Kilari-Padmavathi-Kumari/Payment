@@ -1,5 +1,4 @@
 from sqlalchemy import Column, String, Numeric, DateTime, Boolean, CheckConstraint, Text, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -27,7 +26,8 @@ class User(Base):
 class Order(Base):
     __tablename__ = "orders"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # Keep this aligned with sql/schema.sql where orders.id is VARCHAR(36)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     customer_id = Column(String(100), ForeignKey('users.user_id'), nullable=False)
     amount = Column(Numeric(10, 2), nullable=False)
     currency = Column(String(10), nullable=False)
