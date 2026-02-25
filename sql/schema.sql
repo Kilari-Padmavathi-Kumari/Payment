@@ -13,8 +13,9 @@ CREATE TABLE users (
     email VARCHAR(255) UNIQUE NOT NULL,
     full_name VARCHAR(255) NOT NULL,
     phone VARCHAR(20),
+    hashed_password VARCHAR(255) NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    is_active VARCHAR(10) DEFAULT 'true'
+    is_active BOOLEAN NOT NULL DEFAULT TRUE
 );
 
 -- Create index on email for faster lookups
@@ -37,10 +38,10 @@ CREATE INDEX idx_wallets_updated_at ON wallets(updated_at DESC);
 
 -- Create orders table
 CREATE TABLE orders (
-    id UUID PRIMARY KEY,
+    id VARCHAR(36) PRIMARY KEY,
     customer_id VARCHAR(100) NOT NULL,
     amount NUMERIC(10, 2) NOT NULL,
-    currency VARCHAR(10) NOT NULL,
+    currency VARCHAR(3) NOT NULL DEFAULT 'INR',
     idempotency_key TEXT,
     status VARCHAR(50) NOT NULL DEFAULT 'created',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -63,6 +64,7 @@ COMMENT ON COLUMN users.user_id IS 'Unique user identifier (e.g., CUST-001)';
 COMMENT ON COLUMN users.email IS 'User email address (unique)';
 COMMENT ON COLUMN users.full_name IS 'User full name';
 COMMENT ON COLUMN users.phone IS 'User phone number (optional)';
+COMMENT ON COLUMN users.hashed_password IS 'BCrypt hashed password';
 COMMENT ON COLUMN users.is_active IS 'User account status (true/false)';
 
 COMMENT ON COLUMN wallets.customer_id IS 'References users.user_id';

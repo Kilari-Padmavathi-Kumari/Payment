@@ -52,3 +52,4 @@ SELECT customer_id, balance FROM wallets LIMIT 3;
 
 SELECT 'Sample Orders:' AS info;
 SELECT id, customer_id, amount, currency, status FROM orders LIMIT 3;
+
