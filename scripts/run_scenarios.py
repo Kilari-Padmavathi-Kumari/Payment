@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-import requests
 import argparse
+import asyncio
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import random
 from typing import Any, Dict, List
+
+import httpx
 
 
 class ScenarioRunner:
@@ -14,30 +15,40 @@ class ScenarioRunner:
         self.customer_id = customer_id
         self.email = f"{self.customer_id.lower()}@example.com"
         self.password = "password123"
-        self.session = requests.Session()
+        self.client: httpx.AsyncClient | None = None
         self.auth_headers: Dict[str, str] = {}
 
-    def _json_or_text(self, response: requests.Response) -> Any:
+    async def __aenter__(self):
+        self.client = httpx.AsyncClient()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        if self.client:
+            await self.client.aclose()
+
+    def _json_or_text(self, response: httpx.Response) -> Any:
         try:
             return response.json()
         except ValueError:
             return response.text
 
-    def _request(self, method: str, path: str, **kwargs) -> requests.Response:
+    async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
+        if not self.client:
+            raise RuntimeError("HTTP client is not initialized")
         headers = kwargs.pop("headers", {})
         merged_headers = dict(self.auth_headers)
         merged_headers.update(headers)
-        return self.session.request(
+        return await self.client.request(
             method=method,
             url=f"{self.base_url}{path}",
             headers=merged_headers,
             **kwargs
         )
     
-    def ensure_user(self):
+    async def ensure_user(self):
         """Ensure user exists."""
         print(f"Ensuring user exists for {self.customer_id}...")
-        register_response = self._request(
+        register_response = await self._request(
             "POST",
             "/auth/register",
             json={
@@ -59,7 +70,7 @@ class ScenarioRunner:
                 f"{self._json_or_text(register_response)}"
             )
 
-        login_response = self._request(
+        login_response = await self._request(
             "POST",
             "/auth/login",
             json={"user_id": self.customer_id, "password": self.password},
@@ -76,33 +87,33 @@ class ScenarioRunner:
             raise RuntimeError("Login succeeded but no access token returned")
         self.auth_headers = {"Authorization": f"Bearer {token}"}
     
-    def ensure_wallet(self):
+    async def ensure_wallet(self):
         """Ensure wallet exists with initial balance."""
-        self.ensure_user()
+        await self.ensure_user()
         print(f"Ensuring wallet exists for {self.customer_id}...")
-        response = self._request("GET", f"/wallet/{self.customer_id}", timeout=10.0)
+        response = await self._request("GET", f"/wallet/{self.customer_id}", timeout=10.0)
         if response.status_code == 200:
             data = response.json()
             print(f"Wallet balance: {data['balance']}")
             if data['balance'] < 500:
                 print("Topping up wallet...")
-                self._request(
+                await self._request(
                     "POST",
                     f"/wallet/{self.customer_id}/credit",
                     json={"amount": 1000.0}
                 )
         elif response.status_code == 404:
             print("Creating wallet...")
-            self._request(
+            await self._request(
                 "POST",
                 f"/wallet/{self.customer_id}/credit",
                 json={"amount": 1000.0}
             )
     
-    def orders_retry(self):
+    async def orders_retry(self):
         """Scenario: Order creation with timeout and retry."""
         print("\n=== Running orders_retry scenario ===")
-        self.ensure_user()
+        await self.ensure_user()
         
         idempotency_key = f"retry-test-{int(time.time())}"
         order_payload = {
@@ -114,32 +125,32 @@ class ScenarioRunner:
         
         print(f"Attempt 1: Creating order with idempotency_key={idempotency_key}")
         try:
-            response1 = self._request(
+            response1 = await self._request(
                 "POST",
                 "/orders",
                 json=order_payload,
                 timeout=1.0
             )
             print(f"Attempt 1 response: {response1.status_code} - {self._json_or_text(response1)}")
-        except requests.exceptions.Timeout:
+        except httpx.TimeoutException:
             print("Attempt 1: Request timed out")
         
         print("\nAttempt 2: Retrying same order...")
         try:
-            response2 = self._request(
+            response2 = await self._request(
                 "POST",
                 "/orders",
                 json=order_payload,
                 timeout=5.0
             )
             print(f"Attempt 2 response: {response2.status_code} - {self._json_or_text(response2)}")
-        except requests.exceptions.Timeout:
+        except httpx.TimeoutException:
             print("Attempt 2: Request timed out")
         
-        time.sleep(1)
+        await asyncio.sleep(1)
         
         print(f"\nFetching all orders for {self.customer_id}...")
-        response = self._request("GET", "/orders", params={"customer_id": self.customer_id}, timeout=10.0)
+        response = await self._request("GET", "/orders", params={"customer_id": self.customer_id}, timeout=10.0)
         payload = self._json_or_text(response)
         if response.status_code != 200 or not isinstance(payload, list):
             print(f"Failed to fetch orders: {response.status_code} - {payload}")
@@ -152,22 +163,22 @@ class ScenarioRunner:
         for order in matching_orders:
             print(f"  - Order ID: {order['id']}, Amount: {order['amount']}")
     
-    def wallet_concurrency(self):
+    async def wallet_concurrency(self):
         """Scenario: Concurrent wallet operations."""
         print("\n=== Running wallet_concurrency scenario ===")
         
-        self.ensure_wallet()
+        await self.ensure_wallet()
         
         print("\nSetting up wallet with known balance...")
-        self._request(
+        await self._request(
             "POST",
             f"/wallet/{self.customer_id}/credit",
             json={"amount": 500.0}
         )
         
-        time.sleep(0.5)
+        await asyncio.sleep(0.5)
         
-        initial_response = self._request("GET", f"/wallet/{self.customer_id}", timeout=10.0)
+        initial_response = await self._request("GET", f"/wallet/{self.customer_id}", timeout=10.0)
         initial_payload = self._json_or_text(initial_response)
         if initial_response.status_code != 200 or not isinstance(initial_payload, dict) or "balance" not in initial_payload:
             raise RuntimeError(f"Unable to fetch initial wallet balance: {initial_response.status_code} - {initial_payload}")
@@ -178,28 +189,29 @@ class ScenarioRunner:
         debit_amount = 10.0
         
         print(f"\nExecuting {num_operations} concurrent debits of {debit_amount} each...")
-        
-        def debit_operation(i):
+
+        sem = asyncio.Semaphore(10)
+
+        async def debit_operation(i):
             try:
-                response = self._request(
-                    "POST",
-                    f"/wallet/{self.customer_id}/debit",
-                    json={"amount": debit_amount}
-                )
-                return response.status_code == 200
-            except Exception as e:
+                async with sem:
+                    response = await self._request(
+                        "POST",
+                        f"/wallet/{self.customer_id}/debit",
+                        json={"amount": debit_amount}
+                    )
+                    return response.status_code == 200
+            except Exception:
                 return False
         
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = [executor.submit(debit_operation, i) for i in range(num_operations)]
-            results = [f.result() for f in as_completed(futures)]
+        results = await asyncio.gather(*(debit_operation(i) for i in range(num_operations)))
         
         successful = sum(results)
         print(f"Successful operations: {successful}/{num_operations}")
         
-        time.sleep(0.5)
+        await asyncio.sleep(0.5)
         
-        final_response = self._request("GET", f"/wallet/{self.customer_id}", timeout=10.0)
+        final_response = await self._request("GET", f"/wallet/{self.customer_id}", timeout=10.0)
         final_payload = self._json_or_text(final_response)
         if final_response.status_code != 200 or not isinstance(final_payload, dict) or "balance" not in final_payload:
             raise RuntimeError(f"Unable to fetch final wallet balance: {final_response.status_code} - {final_payload}")
@@ -212,10 +224,10 @@ class ScenarioRunner:
         print(f"Actual final balance: {final_balance}")
         print(f"Difference: {abs(expected_balance - final_balance)}")
     
-    def false_success(self):
+    async def false_success(self):
         """Scenario: API returns success on constraint violation."""
         print("\n=== Running false_success scenario ===")
-        self.ensure_user()
+        await self.ensure_user()
         
         invalid_payload = {
             "customer_id": self.customer_id,
@@ -225,7 +237,7 @@ class ScenarioRunner:
         }
         
         print(f"Creating order with amount=0 (violates constraint)...")
-        response = self._request(
+        response = await self._request(
             "POST",
             "/orders",
             json=invalid_payload
@@ -234,10 +246,10 @@ class ScenarioRunner:
         print(f"Response status: {response.status_code}")
         print(f"Response body: {self._json_or_text(response)}")
         
-        time.sleep(0.5)
+        await asyncio.sleep(0.5)
         
         print(f"\nVerifying order persistence...")
-        orders_response = self._request("GET", "/orders", params={"customer_id": self.customer_id}, timeout=10.0)
+        orders_response = await self._request("GET", "/orders", params={"customer_id": self.customer_id}, timeout=10.0)
         payload = self._json_or_text(orders_response)
         if orders_response.status_code != 200 or not isinstance(payload, list):
             print(f"Failed to fetch orders: {orders_response.status_code} - {payload}")
@@ -252,11 +264,11 @@ class ScenarioRunner:
         else:
             print(f"Order found: {matching[0]}")
     
-    def mixed(self):
+    async def mixed(self):
         """Scenario: Mixed operations."""
         print("\n=== Running mixed scenario ===")
         
-        self.ensure_wallet()
+        await self.ensure_wallet()
         
         operations = [
             ("credit", 200.0),
@@ -271,7 +283,7 @@ class ScenarioRunner:
         for op_type, amount in operations:
             if op_type == "credit":
                 print(f"\nCrediting {amount}...")
-                self._request(
+                await self._request(
                     "POST",
                     f"/wallet/{self.customer_id}/credit",
                     json={"amount": amount}
@@ -279,7 +291,7 @@ class ScenarioRunner:
             elif op_type == "debit":
                 print(f"\nDebiting {amount}...")
                 try:
-                    self._request(
+                    await self._request(
                         "POST",
                         f"/wallet/{self.customer_id}/debit",
                         json={"amount": amount}
@@ -288,7 +300,7 @@ class ScenarioRunner:
                     pass
             elif op_type == "order":
                 print(f"\nCreating order for {amount}...")
-                self._request(
+                await self._request(
                     "POST",
                     "/orders",
                     json={
@@ -299,17 +311,17 @@ class ScenarioRunner:
                     timeout=5.0
                 )
             
-            time.sleep(0.2)
+            await asyncio.sleep(0.2)
         
         print("\n=== Final state ===")
-        wallet = self._request("GET", f"/wallet/{self.customer_id}", timeout=10.0).json()
+        wallet = (await self._request("GET", f"/wallet/{self.customer_id}", timeout=10.0)).json()
         print(f"Wallet balance: {wallet['balance']}")
         
-        orders = self._request("GET", "/orders", params={"customer_id": self.customer_id}, timeout=10.0).json()
+        orders = (await self._request("GET", "/orders", params={"customer_id": self.customer_id}, timeout=10.0)).json()
         print(f"Total orders: {len(orders)}")
 
 
-def main():
+async def main():
     parser = argparse.ArgumentParser(description="Run API test scenarios")
     parser.add_argument("--scenario", default="all", 
                        choices=["orders_retry", "wallet_concurrency", "false_success", "mixed", "all"],
@@ -324,31 +336,29 @@ def main():
                        help="Number of times to repeat the scenario")
     
     args = parser.parse_args()
-    
-    runner = ScenarioRunner(args.base_url, args.customer_id)
-    
-    if args.seed:
-        runner.ensure_wallet()
-    
-    scenarios = {
-        "orders_retry": runner.orders_retry,
-        "wallet_concurrency": runner.wallet_concurrency,
-        "false_success": runner.false_success,
-        "mixed": runner.mixed,
-        "all": runner.mixed
-    }
-    
-    for i in range(args.repeat):
-        if args.repeat > 1:
-            print(f"\n{'='*60}")
-            print(f"Iteration {i+1}/{args.repeat}")
-            print(f"{'='*60}")
-        
-        scenarios[args.scenario]()
-        
-        if i < args.repeat - 1:
-            time.sleep(1)
 
+    async with ScenarioRunner(args.base_url, args.customer_id) as runner:
+        if args.seed:
+            await runner.ensure_wallet()
+
+        scenarios = {
+            "orders_retry": runner.orders_retry,
+            "wallet_concurrency": runner.wallet_concurrency,
+            "false_success": runner.false_success,
+            "mixed": runner.mixed,
+            "all": runner.mixed
+        }
+
+        for i in range(args.repeat):
+            if args.repeat > 1:
+                print(f"\n{'='*60}")
+                print(f"Iteration {i+1}/{args.repeat}")
+                print(f"{'='*60}")
+
+            await scenarios[args.scenario]()
+
+            if i < args.repeat - 1:
+                await asyncio.sleep(1)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
