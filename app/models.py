@@ -1,10 +1,14 @@
-from sqlalchemy import Column, String, Numeric, DateTime, Boolean, CheckConstraint, Text, ForeignKey
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship
-from datetime import datetime
-import uuid
 from datetime import datetime, timezone
+import uuid
+
+from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, ForeignKey, Numeric, String, Text
+from sqlalchemy.orm import declarative_base, relationship
+
 Base = declarative_base()
+
+
+def utcnow():
+    return datetime.now(timezone.utc)
 
 
 class User(Base):
@@ -14,11 +18,10 @@ class User(Base):
     email = Column(String(255), unique=True, nullable=False)
     full_name = Column(String(255), nullable=False)
     phone = Column(String(20), nullable=True)
-    hashed_password = Column(String(255), nullable=True)
-    is_active = Column(Boolean, default=True, nullable=False)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    hashed_password = Column(String(255), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
 
-    # Relationships
     orders = relationship("Order", back_populates="user")
     wallet = relationship("Wallet", back_populates="user", uselist=False)
 
@@ -26,33 +29,30 @@ class User(Base):
 class Order(Base):
     __tablename__ = "orders"
 
-    # Keep this aligned with sql/schema.sql where orders.id is VARCHAR(36)
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    customer_id = Column(String(100), ForeignKey('users.user_id'), nullable=False)
+    customer_id = Column(String(100), ForeignKey("users.user_id"), nullable=False)
     amount = Column(Numeric(10, 2), nullable=False)
-    currency = Column(String(10), nullable=False)
+    currency = Column(String(3), nullable=False, default="INR")
     idempotency_key = Column(Text, nullable=True)
     status = Column(String(50), nullable=False, default="created")
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime(timezone=True), default=utcnow)
 
-    # Relationships
     user = relationship("User", back_populates="orders")
 
     __table_args__ = (
-        CheckConstraint('amount > 0', name='check_order_amount_positive'),
+        CheckConstraint("amount > 0", name="check_order_amount_positive"),
     )
 
 
 class Wallet(Base):
     __tablename__ = "wallets"
 
-    customer_id = Column(String(100), ForeignKey('users.user_id'), primary_key=True)
+    customer_id = Column(String(100), ForeignKey("users.user_id"), primary_key=True)
     balance = Column(Numeric(10, 2), nullable=False, default=0)
-    updated_at = Column(DateTime(timezone=True),default=lambda: datetime.now(timezone.utc),onupdate=lambda: datetime.now(timezone.utc))  
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
-    # Relationships
     user = relationship("User", back_populates="wallet")
 
     __table_args__ = (
-        CheckConstraint('balance >= 0', name='check_wallet_balance_non_negative'),
+        CheckConstraint("balance >= 0", name="check_wallet_balance_non_negative"),
     )
